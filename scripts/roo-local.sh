@@ -18,6 +18,8 @@
 #
 # Required environment variables:
 #   OPENROUTER_API_KEY   Your OpenRouter API key
+#   REPO_URL             HTTPS clone URL of the target repo (e.g. https://github.com/org/repo.git)
+#                        The script clones this repo into a fresh temp directory on every run.
 #
 # Examples:
 #   ROO_TITLE="Add dark mode" ROO_BODY="..." \
@@ -62,9 +64,11 @@ ROO_BODY="${ROO_BODY:-}"
 ROO_COMMENTS="${ROO_COMMENTS:-}"
 ROO_BRANCH="${ROO_BRANCH:-}"
 ROO_ISSUE="${ROO_ISSUE:-}"
+REPO_URL="${REPO_URL:-}"
 
 [[ -z "$ROO_TITLE" ]] && die "ROO_TITLE is required. Pass the issue/ticket title as an env var."
 [[ -z "$ROO_BODY"  ]] && die "ROO_BODY is required. Pass the issue/ticket body as an env var."
+[[ -z "$REPO_URL"  ]] && die "REPO_URL is required. Set it to the HTTPS clone URL of the target repo (e.g. https://github.com/org/repo.git)."
 
 # ─── Prerequisite checks ─────────────────────────────────────────────────────
 check_deps() {
@@ -102,6 +106,16 @@ check_deps() {
   [[ -n "${OPENROUTER_API_KEY:-}" ]] || die "OPENROUTER_API_KEY is not set.\nExport it first:\n  export OPENROUTER_API_KEY=sk-..."
 
   success "All prerequisites satisfied."
+}
+
+# ─── Clone target repo to a fresh workspace ───────────────────────────────────
+setup_workspace() {
+  local dir
+  dir=$(mktemp -d /tmp/roo-workspace-XXXXXX)
+  info "Cloning ${REPO_URL} into ${dir}…"
+  git clone "$REPO_URL" "$dir"
+  cd "$dir"
+  success "Workspace ready: ${dir}"
 }
 
 # ─── Resolve or create branch ─────────────────────────────────────────────────
@@ -306,6 +320,7 @@ Roo completed without modifying any files. Check the output above for details."
 # =============================================================================
 
 check_deps
+setup_workspace
 
 CHANGED=false
 BRANCH=""
