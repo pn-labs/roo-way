@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Local env
+.env
+
+# Roo temp files
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
