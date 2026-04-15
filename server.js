@@ -27,6 +27,7 @@
 // =============================================================================
 
 const http = require('http');
+const https = require('https');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -36,29 +37,48 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 // Label names that map directly to roo-local.sh commands
 const VALID_COMMANDS = new Set(['roo-code', 'roo-design']);
 
-// ─── Repo list helpers ────────────────────────────────────────────────────────
-// Reads REPOS env var (JSON array or pipe-separated), merges with REPO_URL.
-function parseRepos() {
-  const raw = (process.env.REPOS || '').trim();
-  let list = [];
-  if (raw) {
-    if (raw.startsWith('[')) {
-      try {
-        list = JSON.parse(raw);
-      } catch {
-        list = [];
-      }
-    } else {
-      list = raw
-        .split('|')
-        .map((r) => r.trim())
-        .filter(Boolean);
-    }
-  }
-  // Also include the legacy REPO_URL fallback if present and not already listed
-  const single = (process.env.REPO_URL || '').trim();
-  if (single && !list.includes(single)) list.unshift(single);
-  return list;
+// ─── GitHub API helper ────────────────────────────────────────────────────────
+// Makes an authenticated GET request to api.github.com and returns parsed JSON.
+// Follows a single level of Link-header pagination (up to 3 pages, 100/page).
+function ghGet(apiPath) {
+  return new Promise((resolve, reject) => {
+    const token = process.env.GH_TOKEN;
+    if (!token) return reject(new Error('GH_TOKEN is not configured'));
+
+    const options = {
+      hostname: 'api.github.com',
+      path: apiPath,
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'roo-way-server/1.0',
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          if (res.statusCode >= 400) {
+            return reject(
+              new Error(
+                `GitHub API ${res.statusCode}: ${body.message || JSON.stringify(body)}`,
+              ),
+            );
+          }
+          resolve(body);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 const SCRIPT_PATH = path.resolve(__dirname, 'scripts', 'roo-local.sh');
@@ -157,8 +177,57 @@ async function handleHealth(req, res) {
   send(res, 200, { status: 'ok', uptime: process.uptime() });
 }
 
-async function handleRepos(_req, res) {
-  send(res, 200, { repos: parseRepos() });
+async function handleOrgs(_req, res) {
+  if (!process.env.GH_TOKEN)
+    return send(res, 500, { error: 'GH_TOKEN is not configured' });
+  try {
+    const [user, orgs] = await Promise.all([
+      ghGet('/user'),
+      ghGet('/user/orgs?per_page=100'),
+    ]);
+    const list = [
+      { login: user.login, type: 'user', avatar_url: user.avatar_url },
+      ...orgs.map((o) => ({
+        login: o.login,
+        type: 'org',
+        avatar_url: o.avatar_url,
+      })),
+    ];
+    send(res, 200, { orgs: list });
+  } catch (err) {
+    logE('handleOrgs error:', err.message);
+    send(res, 502, { error: err.message });
+  }
+}
+
+async function handleRepos(req, res) {
+  if (!process.env.GH_TOKEN)
+    return send(res, 500, { error: 'GH_TOKEN is not configured' });
+
+  const qs = new URL(req.url, 'http://localhost').searchParams;
+  const org = qs.get('org');
+  const type = qs.get('type') || 'org'; // 'user' | 'org'
+
+  if (!org)
+    return send(res, 400, { error: "Missing required query param 'org'" });
+
+  try {
+    const endpoint =
+      type === 'user'
+        ? `/users/${encodeURIComponent(org)}/repos?per_page=100&sort=full_name&type=owner`
+        : `/orgs/${encodeURIComponent(org)}/repos?per_page=100&sort=full_name`;
+    const raw = await ghGet(endpoint);
+    const repos = raw.map((r) => ({
+      name: r.name,
+      full_name: r.full_name,
+      clone_url: r.clone_url,
+      private: r.private,
+    }));
+    send(res, 200, { repos });
+  } catch (err) {
+    logE('handleRepos error:', err.message);
+    send(res, 502, { error: err.message });
+  }
 }
 
 async function handleUI(_req, res) {
@@ -370,13 +439,20 @@ async function handleUI(_req, res) {
       </select>
     </div>
     <div class="field">
-      <label>Repository <span class="req">*</span></label>
-      <select id="t-repo-select" onchange="onRepoSelectChange()">
-        <option value="" disabled selected>Loading repos…</option>
+      <label>Organisation <span class="req">*</span></label>
+      <select id="t-org" onchange="onOrgChange()">
+        <option value="" disabled selected>Loading…</option>
       </select>
-      <input type="text" id="t-repo-custom" placeholder="https://github.com/org/repo.git"
-             style="margin-top:.5rem;display:none" />
     </div>
+  </div>
+
+  <div class="field">
+    <label>Repository <span class="req">*</span></label>
+    <select id="t-repo-select" onchange="onRepoSelectChange()" disabled>
+      <option value="" disabled selected>Select an organisation first…</option>
+    </select>
+    <input type="text" id="t-repo-custom" placeholder="https://github.com/org/repo.git"
+           style="margin-top:.5rem;display:none" />
   </div>
 
   <div class="field">
@@ -508,55 +584,85 @@ async function handleUI(_req, res) {
   function clearTrigger() {
     ['t-title','t-body','t-branch','t-issue','t-extra','t-comments']
       .forEach(id => document.getElementById(id).value = '');
-    const sel = document.getElementById('t-repo-select');
-    if (sel.options.length) sel.selectedIndex = 0;
+    const orgSel = document.getElementById('t-org');
+    if (orgSel.options.length) { orgSel.selectedIndex = 0; onOrgChange(); }
     document.getElementById('t-repo-custom').style.display = 'none';
     document.getElementById('t-repo-custom').value = '';
     document.getElementById('trigger-response').classList.remove('visible');
   }
 
-  // ── Repo dropdown ────────────────────────────────────────────────────────────
+  // ── Org + Repo dropdowns ─────────────────────────────────────────────────────
   function onRepoSelectChange() {
     const sel    = document.getElementById('t-repo-select');
     const custom = document.getElementById('t-repo-custom');
     custom.style.display = sel.value === '__other__' ? 'block' : 'none';
   }
 
-  async function loadRepos() {
-    const sel = document.getElementById('t-repo-select');
+  async function onOrgChange() {
+    const orgSel  = document.getElementById('t-org');
+    const repoSel = document.getElementById('t-repo-select');
+    const org     = orgSel.value;
+    const type    = orgSel.options[orgSel.selectedIndex]?.dataset.type || 'org';
+
+    repoSel.innerHTML = '<option value="" disabled selected>Loading repos…</option>';
+    repoSel.disabled  = true;
+    document.getElementById('t-repo-custom').style.display = 'none';
+    document.getElementById('t-repo-custom').value = '';
+
+    if (!org) return;
+
     try {
-      const r    = await fetch('/repos');
+      const r    = await fetch(\`/repos?org=\${encodeURIComponent(org)}&type=\${type}\`);
       const data = await r.json();
       const list = Array.isArray(data.repos) ? data.repos : [];
-      sel.innerHTML = '';
-      if (list.length === 0) {
+      repoSel.innerHTML = '';
+      list.forEach((repo) => {
         const opt = document.createElement('option');
-        opt.value = '__other__';
-        opt.textContent = 'Other (enter URL)…';
-        sel.appendChild(opt);
-        document.getElementById('t-repo-custom').style.display = 'block';
-      } else {
-        list.forEach((url) => {
-          const opt = document.createElement('option');
-          opt.value = url;
-          // show only the org/repo portion as label
-          opt.textContent = url.replace(/^https?:\\/\\/[^/]+\\//, '').replace(/\\.git$/, '');
-          opt.title = url;
-          sel.appendChild(opt);
-        });
-        const other = document.createElement('option');
-        other.value = '__other__';
-        other.textContent = 'Other (enter URL)…';
-        sel.appendChild(other);
-      }
-      sel.selectedIndex = 0;
+        opt.value       = repo.clone_url;
+        opt.textContent = repo.name + (repo.private ? ' 🔒' : '');
+        opt.title       = repo.clone_url;
+        repoSel.appendChild(opt);
+      });
+      const other = document.createElement('option');
+      other.value       = '__other__';
+      other.textContent = 'Other (enter URL)…';
+      repoSel.appendChild(other);
+      repoSel.selectedIndex = 0;
+      repoSel.disabled = false;
       onRepoSelectChange();
-    } catch {
-      sel.innerHTML = '<option value="__other__">Other (enter URL)…</option>';
+    } catch (err) {
+      repoSel.innerHTML = '<option value="__other__">Other (enter URL)…</option>';
+      repoSel.disabled  = false;
       document.getElementById('t-repo-custom').style.display = 'block';
     }
   }
-  loadRepos();
+
+  async function loadOrgs() {
+    const orgSel = document.getElementById('t-org');
+    try {
+      const r    = await fetch('/orgs');
+      const data = await r.json();
+      const list = Array.isArray(data.orgs) ? data.orgs : [];
+      orgSel.innerHTML = '';
+      if (list.length === 0) throw new Error('empty');
+      list.forEach((o) => {
+        const opt = document.createElement('option');
+        opt.value            = o.login;
+        opt.textContent      = o.login + (o.type === 'user' ? ' (you)' : '');
+        opt.dataset.type     = o.type;
+        orgSel.appendChild(opt);
+      });
+      orgSel.selectedIndex = 0;
+      await onOrgChange();
+    } catch {
+      orgSel.innerHTML = '<option value="" disabled selected>Could not load orgs — check GH_TOKEN</option>';
+      const repoSel = document.getElementById('t-repo-select');
+      repoSel.innerHTML = '<option value="__other__">Other (enter URL)…</option>';
+      repoSel.disabled  = false;
+      document.getElementById('t-repo-custom').style.display = 'block';
+    }
+  }
+  loadOrgs();
 </script>
 </body>
 </html>`;
@@ -726,7 +832,13 @@ const server = http.createServer(async (req, res) => {
       return await handleUI(req, res);
     if (method === 'GET' && url === '/health')
       return await handleHealth(req, res);
-    if (method === 'GET' && url === '/repos')
+    if (
+      method === 'GET' &&
+      url.startsWith('/orgs') &&
+      !url.startsWith('/orgs/')
+    )
+      return await handleOrgs(req, res);
+    if (method === 'GET' && url.startsWith('/repos'))
       return await handleRepos(req, res);
     if (method === 'POST' && url === '/trigger')
       return await handleTrigger(req, res);
