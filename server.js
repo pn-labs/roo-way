@@ -28,6 +28,7 @@
 const http = require('http');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -58,6 +59,14 @@ function send(res, status, body) {
     'Content-Length': Buffer.byteLength(json),
   });
   res.end(json);
+}
+
+function sendHtml(res, html) {
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html),
+  });
+  res.end(html);
 }
 
 // ─── Run roo-local.sh in the background ──────────────────────────────────────
@@ -118,6 +127,345 @@ function runScript(command, content = {}) {
 
 async function handleHealth(req, res) {
   send(res, 200, { status: 'ok', uptime: process.uptime() });
+}
+
+async function handleUI(_req, res) {
+  const validCommands = [...VALID_COMMANDS];
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>roo-way · Test Console</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2e3148;
+      --accent: #7c6af7;
+      --accent-hover: #9b8dff;
+      --text: #e2e4f0;
+      --muted: #7b7f9e;
+      --success: #34d399;
+      --error: #f87171;
+      --warn: #fbbf24;
+      --radius: 8px;
+      --font: 'Inter', system-ui, sans-serif;
+      --mono: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      min-height: 100vh;
+      padding: 2rem 1rem 4rem;
+    }
+    header {
+      max-width: 760px;
+      margin: 0 auto 2.5rem;
+    }
+    header h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    header p {
+      margin-top: .4rem;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+    .badge {
+      display: inline-block;
+      background: var(--accent);
+      color: #fff;
+      font-size: .65rem;
+      font-weight: 600;
+      letter-spacing: .04em;
+      padding: .15rem .45rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      max-width: 760px;
+      margin: 0 auto 1.5rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 1.2rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .card h2 .method {
+      font-family: var(--mono);
+      font-size: .75rem;
+      font-weight: 700;
+      padding: .2rem .5rem;
+      border-radius: 4px;
+      background: #1e3a5f;
+      color: #60a5fa;
+    }
+    .card h2 .method.post {
+      background: #2d3a1e;
+      color: #86efac;
+    }
+    .field { margin-bottom: 1rem; }
+    label {
+      display: block;
+      font-size: .8rem;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: .35rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    label span.req { color: var(--error); margin-left: 2px; }
+    select, input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: .9rem;
+      padding: .55rem .8rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    select:focus, input:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+    textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-size: .82rem; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    button {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-size: .9rem;
+      font-weight: 600;
+      padding: .6rem 1.3rem;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: .8rem;
+      padding: .4rem .9rem;
+    }
+    button.secondary:hover { border-color: var(--accent); color: var(--text); background: transparent; }
+    .response-box {
+      margin-top: 1.2rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      display: none;
+    }
+    .response-box.visible { display: block; }
+    .response-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: .7rem;
+    }
+    .status-pill {
+      font-size: .78rem;
+      font-weight: 700;
+      padding: .2rem .6rem;
+      border-radius: 20px;
+    }
+    .status-pill.ok { background: #063d28; color: var(--success); }
+    .status-pill.err { background: #3d0606; color: var(--error); }
+    .status-pill.warn { background: #3d2e06; color: var(--warn); }
+    pre {
+      font-family: var(--mono);
+      font-size: .8rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 1.2rem 0;
+    }
+    #health-status { font-size: .85rem; color: var(--muted); display: flex; align-items: center; gap: .5rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+    .dot.green { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    .dot.red { background: var(--error); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🦘 roo-way <span class="badge">Test Console</span></h1>
+  <p>Manually trigger Roo CLI workflows or inspect the health of this server.</p>
+</header>
+
+<!-- Health card -->
+<div class="card">
+  <h2><span class="method">GET</span> /health</h2>
+  <div id="health-status"><span class="dot" id="health-dot"></span><span id="health-text">Checking…</span></div>
+</div>
+
+<!-- Trigger card -->
+<div class="card">
+  <h2><span class="method post">POST</span> /trigger</h2>
+
+  <div class="field">
+    <label>Command <span class="req">*</span></label>
+    <select id="t-command">
+      ${validCommands.map((c) => `<option value="${c}">${c}</option>`).join('\n      ')}
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Title <span class="req">*</span></label>
+    <input type="text" id="t-title" placeholder="e.g. Add retry logic to payment service" />
+  </div>
+
+  <div class="field">
+    <label>Body <span class="req">*</span></label>
+    <textarea id="t-body" placeholder="Full issue / ticket description…"></textarea>
+  </div>
+
+  <hr class="divider" />
+
+  <div class="row">
+    <div class="field">
+      <label>Branch <small style="text-transform:none;font-size:.75rem">(optional)</small></label>
+      <input type="text" id="t-branch" placeholder="auto-derived from title" />
+    </div>
+    <div class="field">
+      <label>Issue # <small style="text-transform:none;font-size:.75rem">(optional)</small></label>
+      <input type="number" id="t-issue" placeholder="42" min="1" />
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label>Extra instruction <small style="text-transform:none;font-size:.75rem">(optional)</small></label>
+      <input type="text" id="t-extra" placeholder="Append to prompt…" />
+    </div>
+    <div class="field">
+      <label>Comments <small style="text-transform:none;font-size:.75rem">(optional)</small></label>
+      <textarea id="t-comments" style="min-height:40px" placeholder="Prior comment history…"></textarea>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:.7rem;align-items:center;margin-top:.4rem">
+    <button id="trigger-btn" onclick="submitTrigger()">▶ Run</button>
+    <button class="secondary" onclick="clearTrigger()">Clear</button>
+  </div>
+
+  <div class="response-box" id="trigger-response">
+    <div class="response-header">
+      <span id="trigger-status-pill" class="status-pill"></span>
+      <span id="trigger-ts" style="font-size:.75rem;color:var(--muted)"></span>
+    </div>
+    <pre id="trigger-pre"></pre>
+  </div>
+</div>
+
+<script>
+  // ── Health check ────────────────────────────────────────────────────────────
+  async function checkHealth() {
+    const dot  = document.getElementById('health-dot');
+    const text = document.getElementById('health-text');
+    try {
+      const r = await fetch('/health');
+      const d = await r.json();
+      dot.className  = 'dot green';
+      text.textContent = \`OK — uptime \${Math.round(d.uptime)}s\`;
+    } catch {
+      dot.className  = 'dot red';
+      text.textContent = 'Unreachable';
+    }
+  }
+  checkHealth();
+
+  // ── Trigger ─────────────────────────────────────────────────────────────────
+  async function submitTrigger() {
+    const btn     = document.getElementById('trigger-btn');
+    const box     = document.getElementById('trigger-response');
+    const pre     = document.getElementById('trigger-pre');
+    const pill    = document.getElementById('trigger-status-pill');
+    const ts      = document.getElementById('trigger-ts');
+
+    const command  = document.getElementById('t-command').value;
+    const title    = document.getElementById('t-title').value.trim();
+    const body     = document.getElementById('t-body').value.trim();
+    const branch   = document.getElementById('t-branch').value.trim();
+    const issueRaw = document.getElementById('t-issue').value.trim();
+    const extra    = document.getElementById('t-extra').value.trim();
+    const comments = document.getElementById('t-comments').value.trim();
+
+    if (!title) { alert('Title is required.'); return; }
+    if (!body)  { alert('Body is required.');  return; }
+
+    const payload = { command, title, body };
+    if (branch)   payload.branch   = branch;
+    if (issueRaw) payload.issue    = Number(issueRaw);
+    if (extra)    payload.extra    = extra;
+    if (comments) payload.comments = comments;
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Sending…';
+    box.classList.remove('visible');
+
+    try {
+      const r    = await fetch('/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json();
+      const ok   = r.status >= 200 && r.status < 300;
+
+      pill.className   = 'status-pill ' + (ok ? 'ok' : 'err');
+      pill.textContent = r.status + ' ' + (ok ? 'Accepted' : 'Error');
+      pre.textContent  = JSON.stringify(data, null, 2);
+      ts.textContent   = new Date().toLocaleTimeString();
+      box.classList.add('visible');
+    } catch (err) {
+      pill.className   = 'status-pill err';
+      pill.textContent = 'Network Error';
+      pre.textContent  = err.message;
+      ts.textContent   = new Date().toLocaleTimeString();
+      box.classList.add('visible');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ Run';
+    }
+  }
+
+  function clearTrigger() {
+    ['t-title','t-body','t-branch','t-issue','t-extra','t-comments']
+      .forEach(id => document.getElementById(id).value = '');
+    document.getElementById('trigger-response').classList.remove('visible');
+  }
+</script>
+</body>
+</html>`;
+  sendHtml(res, html);
 }
 
 async function handleTrigger(req, res) {
@@ -260,6 +608,8 @@ async function handleWebhook(req, res) {
 const server = http.createServer(async (req, res) => {
   const { method, url } = req;
   try {
+    if (method === 'GET' && (url === '/' || url === ''))
+      return await handleUI(req, res);
     if (method === 'GET' && url === '/health')
       return await handleHealth(req, res);
     if (method === 'POST' && url === '/trigger')
