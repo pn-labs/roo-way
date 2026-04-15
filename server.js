@@ -10,6 +10,7 @@
 //
 // POST /trigger body (JSON):
 //   command    {string}  required — one of: roo-bug, roo-code, roo-design, roo-docs
+//   repo       {string}  required — HTTPS clone URL of the target repo (e.g. https://github.com/org/repo.git)
 //   title      {string}  required — issue / ticket title
 //   body       {string}  required — issue / ticket description / body
 //   comments   {string}  optional — prior comment history (plain text)
@@ -34,6 +35,31 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 
 // Label names that map directly to roo-local.sh commands
 const VALID_COMMANDS = new Set(['roo-code', 'roo-design']);
+
+// ─── Repo list helpers ────────────────────────────────────────────────────────
+// Reads REPOS env var (JSON array or pipe-separated), merges with REPO_URL.
+function parseRepos() {
+  const raw = (process.env.REPOS || '').trim();
+  let list = [];
+  if (raw) {
+    if (raw.startsWith('[')) {
+      try {
+        list = JSON.parse(raw);
+      } catch {
+        list = [];
+      }
+    } else {
+      list = raw
+        .split('|')
+        .map((r) => r.trim())
+        .filter(Boolean);
+    }
+  }
+  // Also include the legacy REPO_URL fallback if present and not already listed
+  const single = (process.env.REPO_URL || '').trim();
+  if (single && !list.includes(single)) list.unshift(single);
+  return list;
+}
 
 const SCRIPT_PATH = path.resolve(__dirname, 'scripts', 'roo-local.sh');
 
@@ -78,6 +104,7 @@ function runScript(command, content = {}) {
   const {
     title,
     body,
+    repo = '',
     comments = '',
     branch = '',
     issue = '',
@@ -93,6 +120,7 @@ function runScript(command, content = {}) {
     env: {
       ...process.env,
       PATH: process.env.PATH,
+      REPO_URL: repo,
       ROO_TITLE: title,
       ROO_BODY: body,
       ROO_COMMENTS: comments,
@@ -127,6 +155,10 @@ function runScript(command, content = {}) {
 
 async function handleHealth(req, res) {
   send(res, 200, { status: 'ok', uptime: process.uptime() });
+}
+
+async function handleRepos(_req, res) {
+  send(res, 200, { repos: parseRepos() });
 }
 
 async function handleUI(_req, res) {
@@ -330,11 +362,21 @@ async function handleUI(_req, res) {
 <div class="card">
   <h2><span class="method post">POST</span> /trigger</h2>
 
-  <div class="field">
-    <label>Command <span class="req">*</span></label>
-    <select id="t-command">
-      ${validCommands.map((c) => `<option value="${c}">${c}</option>`).join('\n      ')}
-    </select>
+  <div class="row">
+    <div class="field">
+      <label>Command <span class="req">*</span></label>
+      <select id="t-command">
+        ${validCommands.map((c) => `<option value="${c}">${c}</option>`).join('\n        ')}
+      </select>
+    </div>
+    <div class="field">
+      <label>Repository <span class="req">*</span></label>
+      <select id="t-repo-select" onchange="onRepoSelectChange()">
+        <option value="" disabled selected>Loading repos…</option>
+      </select>
+      <input type="text" id="t-repo-custom" placeholder="https://github.com/org/repo.git"
+             style="margin-top:.5rem;display:none" />
+    </div>
   </div>
 
   <div class="field">
@@ -411,6 +453,10 @@ async function handleUI(_req, res) {
     const ts      = document.getElementById('trigger-ts');
 
     const command  = document.getElementById('t-command').value;
+    const sel      = document.getElementById('t-repo-select').value;
+    const repo     = (sel === '__other__'
+      ? document.getElementById('t-repo-custom').value
+      : sel).trim();
     const title    = document.getElementById('t-title').value.trim();
     const body     = document.getElementById('t-body').value.trim();
     const branch   = document.getElementById('t-branch').value.trim();
@@ -418,10 +464,12 @@ async function handleUI(_req, res) {
     const extra    = document.getElementById('t-extra').value.trim();
     const comments = document.getElementById('t-comments').value.trim();
 
+    if (!repo)  { alert('Repo URL is required.'); return; }
+    if (sel === '__other__' && !repo) { alert('Enter a custom repo URL.'); return; }
     if (!title) { alert('Title is required.'); return; }
     if (!body)  { alert('Body is required.');  return; }
 
-    const payload = { command, title, body };
+    const payload = { command, repo, title, body };
     if (branch)   payload.branch   = branch;
     if (issueRaw) payload.issue    = Number(issueRaw);
     if (extra)    payload.extra    = extra;
@@ -460,8 +508,55 @@ async function handleUI(_req, res) {
   function clearTrigger() {
     ['t-title','t-body','t-branch','t-issue','t-extra','t-comments']
       .forEach(id => document.getElementById(id).value = '');
+    const sel = document.getElementById('t-repo-select');
+    if (sel.options.length) sel.selectedIndex = 0;
+    document.getElementById('t-repo-custom').style.display = 'none';
+    document.getElementById('t-repo-custom').value = '';
     document.getElementById('trigger-response').classList.remove('visible');
   }
+
+  // ── Repo dropdown ────────────────────────────────────────────────────────────
+  function onRepoSelectChange() {
+    const sel    = document.getElementById('t-repo-select');
+    const custom = document.getElementById('t-repo-custom');
+    custom.style.display = sel.value === '__other__' ? 'block' : 'none';
+  }
+
+  async function loadRepos() {
+    const sel = document.getElementById('t-repo-select');
+    try {
+      const r    = await fetch('/repos');
+      const data = await r.json();
+      const list = Array.isArray(data.repos) ? data.repos : [];
+      sel.innerHTML = '';
+      if (list.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '__other__';
+        opt.textContent = 'Other (enter URL)…';
+        sel.appendChild(opt);
+        document.getElementById('t-repo-custom').style.display = 'block';
+      } else {
+        list.forEach((url) => {
+          const opt = document.createElement('option');
+          opt.value = url;
+          // show only the org/repo portion as label
+          opt.textContent = url.replace(/^https?:\\/\\/[^/]+\\//, '').replace(/\\.git$/, '');
+          opt.title = url;
+          sel.appendChild(opt);
+        });
+        const other = document.createElement('option');
+        other.value = '__other__';
+        other.textContent = 'Other (enter URL)…';
+        sel.appendChild(other);
+      }
+      sel.selectedIndex = 0;
+      onRepoSelectChange();
+    } catch {
+      sel.innerHTML = '<option value="__other__">Other (enter URL)…</option>';
+      document.getElementById('t-repo-custom').style.display = 'block';
+    }
+  }
+  loadRepos();
 </script>
 </body>
 </html>`;
@@ -479,6 +574,7 @@ async function handleTrigger(req, res) {
 
   const {
     command,
+    repo,
     title,
     body: issueBody,
     comments,
@@ -490,6 +586,13 @@ async function handleTrigger(req, res) {
   if (!command || !VALID_COMMANDS.has(command)) {
     return send(res, 400, {
       error: `Invalid or missing 'command'. Must be one of: ${[...VALID_COMMANDS].join(', ')}`,
+    });
+  }
+
+  if (!repo || typeof repo !== 'string' || !repo.trim()) {
+    return send(res, 400, {
+      error:
+        "Missing or empty 'repo'. Provide the HTTPS clone URL of the target repository.",
     });
   }
 
@@ -514,6 +617,7 @@ async function handleTrigger(req, res) {
   }
 
   const pid = runScript(command, {
+    repo: repo.trim(),
     title: title.trim(),
     body: issueBody.trim(),
     comments: comments || '',
@@ -525,6 +629,7 @@ async function handleTrigger(req, res) {
   send(res, 202, {
     accepted: true,
     command,
+    repo: repo.trim(),
     title: title.trim(),
     issue: issue != null ? Number(issue) : null,
     pid,
@@ -562,6 +667,8 @@ async function handleWebhook(req, res) {
   // Extract issue content directly from the webhook payload — no GitHub API call needed
   const issueTitle = payload?.issue?.title || '';
   const issueBody = payload?.issue?.body || '(no description)';
+  // GitHub always includes repository.clone_url in webhook payloads
+  const repoUrl = payload?.repository?.clone_url || '';
 
   if (!issueTitle) {
     return send(res, 400, {
@@ -575,6 +682,12 @@ async function handleWebhook(req, res) {
     });
   }
 
+  if (!repoUrl) {
+    return send(res, 400, {
+      error: 'Could not determine repository clone URL from webhook payload',
+    });
+  }
+
   if (!process.env.OPENROUTER_API_KEY) {
     logE('OPENROUTER_API_KEY is not set — cannot process webhook');
     return send(res, 500, {
@@ -583,10 +696,11 @@ async function handleWebhook(req, res) {
   }
 
   log(
-    `Webhook: label '${labelName}' applied to issue #${issueNumber} — "${issueTitle}"`,
+    `Webhook: label '${labelName}' applied to issue #${issueNumber} — "${issueTitle}" (repo: ${repoUrl})`,
   );
 
   const pid = runScript(labelName, {
+    repo: repoUrl,
     title: issueTitle,
     body: issueBody,
     comments: '', // labeled events do not include comment history
@@ -612,6 +726,8 @@ const server = http.createServer(async (req, res) => {
       return await handleUI(req, res);
     if (method === 'GET' && url === '/health')
       return await handleHealth(req, res);
+    if (method === 'GET' && url === '/repos')
+      return await handleRepos(req, res);
     if (method === 'POST' && url === '/trigger')
       return await handleTrigger(req, res);
     if (method === 'POST' && url === '/webhook')
